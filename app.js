@@ -110,6 +110,12 @@ function hasOverride(item, k) {
   return !!(item.variable && m && m.amounts && m.amounts[item.id] != null);
 }
 
+/* Variable bills shown this month that still need their amount set (no override
+ * yet) — these get prompted and sorted to the top. */
+function needsSetItems(k) {
+  return itemsFor(k).filter((it) => it.variable && !hasOverride(it, k));
+}
+
 /* All expense items shown for a month:
  *  - monthly recurring bills: every month
  *  - yearly bills: only in their due month
@@ -263,13 +269,24 @@ function renderMonthly() {
     carry.onclick = () => {
       ensureMonth(nextKey).balance = Number(c.balance);
       save();
-      currentKey = nextKey;
-      renderMonthly();
       toast('Carried over to ' + MONTHS[keyParts(nextKey).m - 1]);
+      enterMonth(nextKey);
     };
   } else {
     carry.hidden = true;
     carry.onclick = null;
+  }
+
+  // Prompt banner for variable bills that still need this month's amount.
+  const needs = needsSetItems(currentKey).filter((it) => !ensureMonth(currentKey).paid[it.id]);
+  const vp = el('varPrompt');
+  if (needs.length) {
+    vp.hidden = false;
+    el('varPromptText').textContent = needs.length === 1
+      ? '1 bill changes each month — set this month’s amount.'
+      : needs.length + ' bills change each month — set this month’s amounts.';
+  } else {
+    vp.hidden = true;
   }
 
   // List
@@ -283,9 +300,14 @@ function renderMonthly() {
   }
   empty.hidden = true;
   const m = ensureMonth(currentKey);
-  // Show unpaid expenses first; ticked (paid) ones sink to the bottom.
-  // Array.sort is stable, so the order within each group is preserved.
-  const ordered = c.items.slice().sort((a, b) => (m.paid[a.id] ? 1 : 0) - (m.paid[b.id] ? 1 : 0));
+  // Ordering (stable): unpaid variable bills needing an amount first, then other
+  // unpaid bills, then paid bills at the bottom.
+  const rank = (it) => {
+    if (m.paid[it.id]) return 2;
+    if (it.variable && !hasOverride(it, currentKey)) return 0;
+    return 1;
+  };
+  const ordered = c.items.slice().sort((a, b) => rank(a) - rank(b));
   for (const it of ordered) {
     const paid = !!m.paid[it.id];
     const col = colorFor(it.name);
@@ -501,6 +523,9 @@ function deleteItem() {
 /* ------------------------------------------------------------------ *
  * Per-month amount sheet (for a varying bill)
  * ------------------------------------------------------------------ */
+let amtQueue = [];                 // remaining items in a "set them all" chain
+const autoPrompted = new Set();    // month keys already auto-prompted this session
+
 function openMonthAmount(it) {
   editingAmtId = it.id;
   const mName = MONTHS[keyParts(currentKey).m - 1];
@@ -509,9 +534,35 @@ function openMonthAmount(it) {
   const m = ensureMonth(currentKey);
   const cur = (m.amounts && m.amounts[it.id] != null) ? m.amounts[it.id] : (Number(it.amount) || 0);
   el('amtInput').value = cur;
-  el('amtHelp').textContent = 'Set the amount for ' + mName + ' only. Default is ' + money(Number(it.amount) || 0) + '.';
+  const extra = amtQueue.length ? ' (' + amtQueue.length + ' more after this)' : '';
+  el('amtHelp').textContent = 'Set the amount for ' + mName + ' only. Default is ' + money(Number(it.amount) || 0) + '.' + extra;
   openSheet('amtSheet');
   el('amtInput').focus();
+}
+
+/* Open the amount sheet for a list of bills, one after another. */
+function startVariableChain(items) {
+  amtQueue = items.slice();
+  advanceChain();
+}
+function advanceChain() {
+  if (amtQueue.length) { const it = amtQueue.shift(); openMonthAmount(it); }
+}
+function stopChain() { amtQueue = []; }
+
+/* On entering a month, prompt once (per session) to set any variable amounts. */
+function maybeAutoPrompt(k) {
+  if (autoPrompted.has(k)) return;
+  const needs = needsSetItems(k).filter((it) => !ensureMonth(k).paid[it.id]);
+  if (!needs.length) return;
+  autoPrompted.add(k);
+  startVariableChain(needs);
+}
+
+function enterMonth(k) {
+  currentKey = k;
+  renderMonthly();
+  maybeAutoPrompt(k);
 }
 
 function saveMonthAmount() {
@@ -523,6 +574,7 @@ function saveMonthAmount() {
   save();
   closeSheet('amtSheet');
   renderMonthly();
+  advanceChain();
 }
 
 function resetMonthAmount() {
@@ -532,7 +584,7 @@ function resetMonthAmount() {
   save();
   closeSheet('amtSheet');
   renderMonthly();
-  toast('Using the default amount');
+  advanceChain();
 }
 
 /* ------------------------------------------------------------------ *
@@ -613,10 +665,14 @@ function toast(msg) {
 /* ------------------------------------------------------------------ *
  * Wiring
  * ------------------------------------------------------------------ */
-el('prevMonth').addEventListener('click', () => { currentKey = shiftMonth(currentKey, -1); renderMonthly(); });
-el('nextMonth').addEventListener('click', () => { currentKey = shiftMonth(currentKey, 1); renderMonthly(); });
+el('prevMonth').addEventListener('click', () => enterMonth(shiftMonth(currentKey, -1)));
+el('nextMonth').addEventListener('click', () => enterMonth(shiftMonth(currentKey, 1)));
 el('addFab').addEventListener('click', () => openAdd(null));
 el('balanceStat').addEventListener('click', openBalance);
+el('varPromptBtn').addEventListener('click', () => {
+  const needs = needsSetItems(currentKey).filter((it) => !ensureMonth(currentKey).paid[it.id]);
+  if (needs.length) startVariableChain(needs);
+});
 
 el('navMonthly').addEventListener('click', () => showScreen('monthly'));
 el('navBudget').addEventListener('click', () => showScreen('budget'));
@@ -636,8 +692,8 @@ el('sheet').addEventListener('click', (e) => { if (e.target === el('sheet')) clo
 
 el('amtSave').addEventListener('click', saveMonthAmount);
 el('amtReset').addEventListener('click', resetMonthAmount);
-el('amtCancel').addEventListener('click', () => closeSheet('amtSheet'));
-el('amtSheet').addEventListener('click', (e) => { if (e.target === el('amtSheet')) closeSheet('amtSheet'); });
+el('amtCancel').addEventListener('click', () => { stopChain(); closeSheet('amtSheet'); });
+el('amtSheet').addEventListener('click', (e) => { if (e.target === el('amtSheet')) { stopChain(); closeSheet('amtSheet'); } });
 
 el('balSave').addEventListener('click', saveBalance);
 el('balCancel').addEventListener('click', () => closeSheet('balSheet'));
@@ -666,6 +722,7 @@ el('importFile').addEventListener('change', (e) => { if (e.target.files[0]) impo
  * ------------------------------------------------------------------ */
 ensureMonth(currentKey);
 showScreen('monthly');
+maybeAutoPrompt(currentKey);
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
