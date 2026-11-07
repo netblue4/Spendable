@@ -201,6 +201,35 @@ function renderMonthly() {
   el('reservedVal').textContent = money(c.reserved);
   el('paidCount').textContent = c.total ? (c.paidN + '/' + c.total + ' paid') : '';
 
+  // Carry-over button: pull last month's balance when this one is blank,
+  // otherwise push this month's balance forward as next month's starting point.
+  const carry = el('carryBtn');
+  const prevKey = shiftMonth(currentKey, -1);
+  const nextKey = shiftMonth(currentKey, 1);
+  const prevBal = state.months[prevKey] ? state.months[prevKey].balance : null;
+  if (c.balance === null && prevBal !== null && prevBal !== undefined) {
+    carry.hidden = false;
+    carry.textContent = 'Start from ' + MONTHS[keyParts(prevKey).m - 1] + '’s balance (' + money(Number(prevBal)) + ')';
+    carry.onclick = () => {
+      ensureMonth(currentKey).balance = Number(prevBal);
+      save(); renderMonthly();
+      toast('Balance carried over');
+    };
+  } else if (c.balance !== null) {
+    carry.hidden = false;
+    carry.textContent = 'Carry over to ' + MONTHS[keyParts(nextKey).m - 1] + ' →';
+    carry.onclick = () => {
+      ensureMonth(nextKey).balance = Number(c.balance);
+      save();
+      currentKey = nextKey;
+      renderMonthly();
+      toast('Carried over to ' + MONTHS[keyParts(nextKey).m - 1]);
+    };
+  } else {
+    carry.hidden = true;
+    carry.onclick = null;
+  }
+
   // List
   const list = el('expenseList');
   const empty = el('emptyState');
