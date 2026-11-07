@@ -1,16 +1,15 @@
-/* Service worker for Language Learner.
+/* Service worker for Spendable.
  *
  * Network-first: when online we always fetch the latest file and refresh the
  * cache, so updates show up on reload. We only fall back to the cache when the
- * network fails (offline), which keeps the app usable on a ride with no signal.
+ * network fails (offline), which keeps the app usable with no signal.
  * Bump CACHE whenever you want to guarantee old caches are evicted. */
-const CACHE = 'langlearner-v3';
+const CACHE = 'spendable-v1';
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
   './app.js',
-  './phrases.json',
   './manifest.webmanifest',
   './icons/icon.svg',
 ];
@@ -32,20 +31,15 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
-  // Only manage our own origin; let anything else go straight to the network.
-  if (new URL(req.url).origin !== self.location.origin) return;
+  if (new URL(req.url).origin !== self.location.origin) return; // let fonts etc. pass through
 
   event.respondWith(
     fetch(req)
       .then((res) => {
-        // Cache a fresh copy for offline use.
         const copy = res.clone();
         caches.open(CACHE).then((cache) => cache.put(req, copy)).catch(() => {});
         return res;
       })
-      .catch(() =>
-        // Offline: serve the cached copy, falling back to the app shell.
-        caches.match(req).then((cached) => cached || caches.match('./index.html'))
-      )
+      .catch(() => caches.match(req).then((cached) => cached || caches.match('./index.html')))
   );
 });

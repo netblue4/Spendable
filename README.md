@@ -1,111 +1,67 @@
-# Language Learner — Cycling Language Loop 🚲🎧
+# Spendable 🪙
 
-A mobile-friendly **Progressive Web App** for hands-free language practice while
-cycling. It reads each phrase aloud in **English → German → French** using your
-device's built-in text-to-speech, and — crucially — responds to **Bluetooth
-headset media buttons** so you can skip phrases without touching your phone.
+A cute, super-simple budgeting web app for people who **don't want to budget**.
+It answers one question:
 
-- **Double-tap** your earphones (*Next Track*) → jump to the **next phrase** and start reading it.
-- **Single-tap** (*Play/Pause*) → pause or resume the sequence.
+> **How much can I spend right now and still have enough for my bills?**
 
-No build step, no dependencies, no server-side code. Just static files.
+No accounts, no logins, no spreadsheets. Open it, add your bills once, and each
+month tick them off as they leave your account — the app always shows the one
+number that matters: **what's safe to spend.**
 
----
-
-## Features
-
-- **Home screen** listing every topic from `phrases.json`.
-- **Player screen** showing the English, German and French text, with the line
-  currently being spoken highlighted.
-- **Play / Pause / Next / Previous** on-screen controls (big, glove-friendly targets).
-- **One sentence at a time**: each card is a single sentence, so you learn in
-  small chunks rather than a whole paragraph at once.
-- **Multi-language TTS queue**: English (`en-US`) → 1 s pause → German (`de-DE`)
-  → 1 s pause → French (`fr-FR`) → 2 s pause → auto-advance to the next sentence.
-- **"Repeat German & French twice"** toggle: English is spoken once, then the
-  German and French sentences are each repeated, for extra reps on the languages
-  you're learning.
-- **"Loop topic"** toggle to repeat a topic continuously on a long ride.
-- **Speed slider** (0.5×–1.5×) to slow the speech down while you're learning.
-- Large, well-spaced controls sized for tapping with cycling gloves on.
-- The speed and both toggles are remembered on your device between sessions.
-- **OS media / Bluetooth headset controls** via the Media Session API.
-- **Installable PWA** with offline caching (service worker).
-- Keyboard shortcuts on desktop: **Space** = play/pause, **←/→** = prev/next.
+> Live app: enable GitHub Pages for this repo and open
+> `https://netblue4.github.io/LanguageLearner/`
+> *(the repo is still named "LanguageLearner" — the app inside it is Spendable; you can rename the repo in Settings if you like.)*
 
 ---
 
-## How the headset controls actually work
+## How it works
 
-This is the tricky part the spec calls out, so here's the design:
+**The maths is just:**
 
-Hardware media keys (including the double-tap "next" gesture on Bluetooth
-earbuds) are only delivered to a web page that owns an **active OS Media
-Session**. A Media Session only exists while the page is **playing real audio** —
-and the Web Speech API's `speechSynthesis` does **not** count as media.
-
-So the app plays a **silent, looping WAV clip** (generated in-code as a `data:`
-URI, volume 0) the moment you press Play. That holds the Media Session open, and
-we register handlers on it:
-
-```js
-navigator.mediaSession.setActionHandler('nexttrack',     next);      // double-tap
-navigator.mediaSession.setActionHandler('previoustrack', previous);
-navigator.mediaSession.setActionHandler('play',  play);             // single-tap
-navigator.mediaSession.setActionHandler('pause', pause);            // single-tap
+```
+safe to spend  =  current balance  −  bills you haven't paid yet
 ```
 
-Now a double-tap on the earbuds fires `nexttrack` → we cancel the current
-utterance, advance the phrase index, and immediately start speaking the new
-phrase. Single-tap toggles play/pause. The phrase title also shows up on the
-device's lock-screen media widget.
+When a bill leaves your account, your balance drops **and** that bill is no
+longer "owed" — so your safe-to-spend stays the same. That's the whole trick:
+you always know what's truly yours to spend.
 
-> The first Play must come from an on-screen tap — browsers require a user
-> gesture before audio (and therefore the media session) can start. After that,
-> the headset buttons take over.
+### Two screens
 
----
+**1. Budget** (set up once)
+- Tap a common bill (Rent, Water, Electricity, Phone…) or type your own
+  (e.g. *"Jenny uni fees"*).
+- Enter the amount.
+- Choose **Every month** (recurring) or **One-off** (e.g. *"pay Jenny back"*).
 
-## Running it
+**2. Monthly** (use all the time)
+- Pick the month.
+- See your big **safe-to-spend** number and a progress bar of what's left.
+- Tap the green **✓** next to a bill the moment it comes off your account.
+- Tap **Balance** to punch in your current account balance.
 
-Because it uses `fetch()` and a service worker, serve it over http(s) — opening
-`index.html` directly from the filesystem (`file://`) won't load `phrases.json`.
-
-```bash
-# from the project folder
-python3 -m http.server 8080
-# then open http://localhost:8080 on your phone (same Wi-Fi) or desktop
-```
-
-Or deploy the folder to any static host (GitHub Pages, Netlify, Vercel, …) and
-open it on your phone. On Android Chrome / iOS Safari, use **"Add to Home
-Screen"** to install it as a standalone app.
-
-### GitHub Pages
-Push these files to a repo and enable Pages (Settings → Pages → deploy from
-branch). The app is entirely static, so it works as-is.
+That's it. Recurring bills show up automatically every month; one-offs show up
+only in the month you add them.
 
 ---
 
-## Editing the phrases
+## Your data & privacy
 
-All content lives in **`phrases.json`**:
+- Everything is stored **only on your device**, in the browser's `localStorage`.
+  Nothing is uploaded anywhere; it works offline.
+- It survives closing the app, reloading, and adding it to your home screen.
+- It would be lost if you clear the browser's site data, so the **Budget →
+  Settings → Backup** section lets you **Export** a backup file and **Restore**
+  it (handy for moving to a new phone).
 
-```json
-{
-  "courseTitle": "Cycling Language Loop",
-  "lessons": [
-    {
-      "topic": "Ordering Coffee",
-      "items": [
-        { "id": "2-1", "english": "…", "german": "…", "french": "…" }
-      ]
-    }
-  ]
-}
-```
+---
 
-Add topics or phrases and reload — no code changes needed.
+## Install it on your phone (PWA)
+
+1. Enable GitHub Pages (repo **Settings → Pages → Deploy from branch → `main` / root**).
+2. Open the site URL on your phone.
+3. Browser menu → **Add to Home Screen**. It then opens full-screen like a normal app.
 
 ---
 
@@ -113,24 +69,11 @@ Add topics or phrases and reload — no code changes needed.
 
 | File | Purpose |
 |------|---------|
-| `index.html` | Home + Player screens |
-| `styles.css` | Dark, high-contrast, mobile-first styling |
-| `app.js` | TTS queue state machine + Media Session / headset bridge |
-| `phrases.json` | The course content |
+| `index.html` | The two screens + add/balance sheets |
+| `styles.css` | Cute, pastel, mobile-first styling |
+| `app.js` | All logic + `localStorage` persistence |
 | `manifest.webmanifest` | PWA metadata |
-| `sw.js` | Offline caching service worker |
+| `sw.js` | Offline caching service worker (network-first) |
 | `icons/` | App icons |
 
----
-
-## Browser support & notes
-
-- Best on **Chrome / Edge (Android & desktop)** and **Safari (iOS/macOS)**, which
-  support both the Web Speech API and the Media Session API.
-- Available TTS voices depend on the device. If a German or French voice isn't
-  installed, the OS may fall back to a default voice — install the language pack
-  in your system settings for correct pronunciation.
-- On mobile, locking the screen can suspend speech synthesis in some browsers.
-  For the most reliable hands-free ride, keep the screen on (or mounted) — the
-  silent-audio session keeps media-key control working in the background where
-  the OS permits it.
+No build step, no dependencies — just static files.

@@ -1,459 +1,497 @@
-/* Language Learner — Cycling Language Loop
- * Hands-free EN -> DE -> FR text-to-speech with Bluetooth headset controls.
+/* Spendable — a cute, self-contained budget helper.
  *
- * Two hard parts, per the spec:
- *   1) A reliable multi-language TTS queue (speak, pause between languages, auto-advance).
- *   2) OS media controls so a double-tap on Bluetooth earphones = "Next phrase".
- *      Hardware media keys only reach a web page that owns an active Media Session,
- *      and a Media Session only exists while real audio is playing. speechSynthesis
- *      does NOT count as media, so we loop a silent audio clip to hold the session
- *      and wire navigator.mediaSession action handlers to our transport functions.
+ * The whole point: show one number — how much you can safely spend this month
+ * while still having enough left for the bills you haven't paid yet.
+ *
+ *   safe to spend  =  current balance  −  bills still unpaid
+ *
+ * All data lives on this device in localStorage (one small JSON blob), saved on
+ * every change. No accounts, no server, works offline. Backup/Restore lets you
+ * move it to another phone.
  */
 'use strict';
 
 /* ------------------------------------------------------------------ *
- * Timing constants (milliseconds)
+ * Storage
  * ------------------------------------------------------------------ */
-const PAUSE_AFTER_EN = 1000;
-const PAUSE_AFTER_DE = 1000;
-const PAUSE_AFTER_FR = 2000; // then auto-advance to the next phrase
+const STORAGE_KEY = 'spendable.v1';
+
+function defaultState() {
+  return { v: 1, currency: '€', recurring: [], months: {} };
+}
+
+let state = loadState();
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return defaultState();
+    const s = JSON.parse(raw);
+    if (!s || typeof s !== 'object') return defaultState();
+    s.v = 1;
+    s.currency = s.currency || '€';
+    s.recurring = Array.isArray(s.recurring) ? s.recurring : [];
+    s.months = (s.months && typeof s.months === 'object') ? s.months : {};
+    return s;
+  } catch (e) {
+    console.warn('load failed', e);
+    return defaultState();
+  }
+}
+
+function save() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+  catch (e) { toast('Could not save — device storage may be full or blocked.'); }
+}
 
 /* ------------------------------------------------------------------ *
- * DOM references
+ * Helpers
  * ------------------------------------------------------------------ */
 const el = (id) => document.getElementById(id);
-const homeScreen   = el('home');
-const playerScreen = el('player');
-const topicList    = el('topicList');
-const courseTitleEl = el('courseTitle');
-const playerTopicEl = el('playerTopic');
-const progressEl   = el('progress');
-const statusEl     = el('status');
-const textEn = el('textEn'), textDe = el('textDe'), textFr = el('textFr');
-const langRows = {
-  en: document.querySelector('.lang-row[data-active="en"]'),
-  de: document.querySelector('.lang-row[data-active="de"]'),
-  fr: document.querySelector('.lang-row[data-active="fr"]'),
-};
-const playBtn = el('playBtn');
-const silenceAudio = el('silence');
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+let currentKey = ym(new Date());
+
+function ym(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); }
+function keyParts(k) { const [y, m] = k.split('-').map(Number); return { y, m }; }
+function monthLabel(k) { const { y, m } = keyParts(k); return (MONTHS[m - 1] + ' ' + y).toUpperCase(); }
+function shiftMonth(k, delta) {
+  const { y, m } = keyParts(k);
+  const d = new Date(y, m - 1 + delta, 1);
+  return ym(d);
+}
+
+function money(n) {
+  const sign = n < 0 ? '-' : '';
+  const v = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return sign + state.currency + v;
+}
+
+function ensureMonth(k) {
+  if (!state.months[k]) state.months[k] = { balance: null, paid: {}, oneoffs: [] };
+  const m = state.months[k];
+  if (!m.paid) m.paid = {};
+  if (!Array.isArray(m.oneoffs)) m.oneoffs = [];
+  if (m.balance === undefined) m.balance = null;
+  return m;
+}
+
+/* All expense items shown for a month: recurring template + this month's one-offs. */
+function itemsFor(k) {
+  const m = ensureMonth(k);
+  const rec = state.recurring.map((e) => ({ ...e, kind: 'recurring' }));
+  const one = m.oneoffs.map((e) => ({ ...e, kind: 'oneoff' }));
+  return rec.concat(one);
+}
+
+function computeMonth(k) {
+  const m = ensureMonth(k);
+  const items = itemsFor(k);
+  let reserved = 0, paidSum = 0, paidN = 0;
+  for (const it of items) {
+    const amt = Number(it.amount) || 0;
+    if (m.paid[it.id]) { paidSum += amt; paidN += 1; }
+    else reserved += amt;
+  }
+  const balance = (m.balance === null || m.balance === undefined) ? null : Number(m.balance);
+  const free = balance === null ? null : balance - reserved;
+  return { items, reserved, paidSum, paidN, total: items.length, balance, free };
+}
 
 /* ------------------------------------------------------------------ *
- * App state
+ * Icons & colours
  * ------------------------------------------------------------------ */
-let course = null;          // parsed phrases.json
-let lessonIndex = 0;        // current topic
-let items = [];             // items of the current topic
-let itemIndex = 0;          // current phrase within topic
-let phaseIndex = 0;         // 0 = en, 1 = de, 2 = fr
-let isPlaying = false;      // are we actively running the sequence?
-let sessionStarted = false; // has the silent audio / media session started?
-let speechRate = 0.9;       // TTS rate, controlled by the speed slider
+const PRESETS = [
+  { name: 'Rent', icon: '🏠' }, { name: 'Groceries', icon: '🛒' },
+  { name: 'Electricity', icon: '⚡' }, { name: 'Water', icon: '💧' },
+  { name: 'Internet', icon: '📶' }, { name: 'Phone', icon: '📱' },
+  { name: 'Transport', icon: '🚌' }, { name: 'Savings', icon: '🐷' },
+  { name: 'Gym', icon: '🏋️' }, { name: 'Subscriptions', icon: '📺' },
+  { name: 'Insurance', icon: '🛡️' }, { name: 'Fun', icon: '🎉' },
+];
 
-let phaseTimer = null;      // timeout between languages / phrases
-let keepAlive = null;       // Chrome speechSynthesis keep-alive pump
+const PALETTE = [
+  { bg: '#fbe3e6', fg: '#d8566a' }, { bg: '#e7e2fb', fg: '#7b61c4' },
+  { bg: '#fdeccf', fg: '#c98a1e' }, { bg: '#d9f2e5', fg: '#2f9e6b' },
+  { bg: '#d9ecfb', fg: '#3a86c4' }, { bg: '#fde0ef', fg: '#c74f93' },
+  { bg: '#e3f3d9', fg: '#5b9e39' }, { bg: '#fbe6d9', fg: '#c96a37' },
+];
 
-/* Build the phase list for the current sentence.
- * Default: English -> German -> French (each once).
- * When "Repeat German & French twice" is ticked: English once, then German
- * twice and French twice, so the target-language sentences get extra reps. */
-function phasesForCurrentItem() {
-  const item = items[itemIndex];
-  const repeat = el('repeatChk').checked;
-  const phases = [
-    { key: 'en', lang: 'en-US', text: item.english, pauseAfter: PAUSE_AFTER_EN },
-    { key: 'de', lang: 'de-DE', text: item.german,  pauseAfter: PAUSE_AFTER_DE },
+function guessIcon(name) {
+  const n = (name || '').toLowerCase();
+  const map = [
+    [/rent|mortgage|accommod/, '🏠'], [/water/, '💧'], [/electri|power|energy/, '⚡'],
+    [/wifi|internet|fibre|fiber|broadband/, '📶'], [/phone|mobile|cell|sim|airtime/, '📱'],
+    [/grocer|food|supermarket/, '🛒'], [/transport|bus|train|metro|petrol|fuel|gas|car|uber/, '🚌'],
+    [/sav(e|ing)|invest/, '🐷'], [/gym|fitness|sport/, '🏋️'],
+    [/netflix|spotify|prime|disney|subscription|canva|claude|gemini|youtube/, '📺'],
+    [/insur|assurance|cover/, '🛡️'], [/uni|school|tuition|fees|course|study|educat/, '🎓'],
+    [/fun|entertain|night|party|game/, '🎉'], [/health|medic|dental|doctor|pharm/, '➕'],
+    [/pay .* back|loan|debt|owe/, '🤝'], [/rates|tax|fee|bank/, '💳'],
   ];
-  if (repeat) {
-    phases.push({ key: 'de', lang: 'de-DE', text: item.german, pauseAfter: PAUSE_AFTER_DE, again: true });
-  }
-  // First French: short pause before its repeat when repeating, else the normal
-  // end-of-sentence pause before auto-advancing.
-  phases.push({ key: 'fr', lang: 'fr-FR', text: item.french, pauseAfter: repeat ? PAUSE_AFTER_DE : PAUSE_AFTER_FR });
-  if (repeat) {
-    phases.push({ key: 'fr', lang: 'fr-FR', text: item.french, pauseAfter: PAUSE_AFTER_FR, again: true });
-  }
-  return phases;
+  for (const [re, ico] of map) if (re.test(n)) return ico;
+  return '💸';
 }
 
-/* ================================================================== *
- * Data loading
- * ================================================================== */
-async function loadCourse() {
-  try {
-    const res = await fetch('phrases.json', { cache: 'no-cache' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    course = await res.json();
-  } catch (err) {
-    statusEl.textContent = 'Could not load phrases.json';
-    toast('Failed to load phrases. Serve this app over http(s), not file://');
-    console.error(err);
+function colorFor(name) {
+  let h = 0;
+  const s = name || '';
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return PALETTE[h % PALETTE.length];
+}
+
+/* ------------------------------------------------------------------ *
+ * Screen switching
+ * ------------------------------------------------------------------ */
+function showScreen(which) {
+  el('monthly').hidden = which !== 'monthly';
+  el('budget').hidden = which !== 'budget';
+  el('addFab').hidden = which !== 'monthly';
+  el('navMonthly').classList.toggle('active', which === 'monthly');
+  el('navBudget').classList.toggle('active', which === 'budget');
+  if (which === 'monthly') renderMonthly(); else renderBudget();
+  window.scrollTo(0, 0);
+}
+
+/* ------------------------------------------------------------------ *
+ * Monthly screen
+ * ------------------------------------------------------------------ */
+function renderMonthly() {
+  el('monthLabel').textContent = monthLabel(currentKey);
+  const c = computeMonth(currentKey);
+
+  // Hero
+  const hero = el('heroAmount');
+  const cap = el('heroCaption');
+  hero.classList.remove('negative', 'unset');
+  if (c.balance === null) {
+    hero.textContent = money(c.reserved);
+    hero.classList.add('unset');
+    cap.textContent = c.total ? 'of bills to cover — tap Balance to begin' : 'add your bills to begin';
+  } else if (c.free >= 0) {
+    hero.textContent = money(c.free);
+    cap.textContent = 'safe to spend';
+  } else {
+    hero.textContent = money(c.free);
+    hero.classList.add('negative');
+    cap.textContent = 'short for your bills';
+  }
+
+  // Bar
+  const free = el('barFree'), res = el('barReserved'), legend = el('barLegend');
+  if (c.balance === null || c.balance <= 0) {
+    free.style.width = '0%';
+    res.style.width = c.reserved > 0 ? '100%' : '0%';
+    legend.innerHTML = c.balance === null
+      ? 'Set your balance to see what’s safe to spend'
+      : '<b>' + money(0) + '</b> left';
+  } else if (c.free >= 0) {
+    free.style.width = (100 * c.free / c.balance) + '%';
+    res.style.width = (100 * c.reserved / c.balance) + '%';
+    legend.innerHTML = '<b>' + money(c.free) + '</b> left of <b>' + money(c.balance) + '</b>';
+  } else {
+    free.style.width = '0%';
+    res.style.width = '100%';
+    legend.innerHTML = 'Over by <b>' + money(-c.free) + '</b> — bills exceed balance';
+  }
+
+  // Stats
+  el('balanceVal').textContent = c.balance === null ? 'Tap to set' : money(c.balance);
+  el('reservedVal').textContent = money(c.reserved);
+  el('paidCount').textContent = c.total ? (c.paidN + '/' + c.total + ' paid') : '';
+
+  // List
+  const list = el('expenseList');
+  const empty = el('emptyState');
+  list.innerHTML = '';
+  if (!c.items.length) {
+    empty.hidden = false;
+    empty.innerHTML = '<b>No expenses yet.</b><br>Tap the <b>+</b> button, or go to <b>Budget</b> to add your monthly bills.';
     return;
   }
-  courseTitleEl.textContent = course.courseTitle || 'Language Learner';
-  document.title = `${course.courseTitle} — Language Learner`;
-  renderTopics();
-}
-
-/* ================================================================== *
- * Home screen
- * ================================================================== */
-function renderTopics() {
-  topicList.innerHTML = '';
-  course.lessons.forEach((lesson, i) => {
+  empty.hidden = true;
+  const m = ensureMonth(currentKey);
+  for (const it of c.items) {
+    const paid = !!m.paid[it.id];
+    const col = colorFor(it.name);
     const li = document.createElement('li');
-    const btn = document.createElement('button');
-    btn.className = 'topic-btn';
-    btn.innerHTML =
-      `<span>${escapeHtml(lesson.topic)}<br><span class="count">${lesson.items.length} phrases</span></span>` +
-      `<span class="chevron" aria-hidden="true">›</span>`;
-    btn.addEventListener('click', () => openTopic(i));
-    li.appendChild(btn);
-    topicList.appendChild(li);
-  });
-}
+    li.className = 'exp' + (paid ? ' paid' : '');
 
-function showScreen(which) {
-  homeScreen.hidden = which !== 'home';
-  playerScreen.hidden = which !== 'player';
-}
+    const ico = document.createElement('div');
+    ico.className = 'ico';
+    ico.style.background = col.bg; ico.style.color = col.fg;
+    ico.textContent = it.icon || guessIcon(it.name);
 
-/* ================================================================== *
- * Player screen
- * ================================================================== */
-function openTopic(i) {
-  lessonIndex = i;
-  items = course.lessons[i].items;
-  itemIndex = 0;
-  phaseIndex = 0;
-  playerTopicEl.textContent = course.lessons[i].topic;
-  showScreen('player');
-  renderItem();
-  statusEl.textContent = 'Press Play to start';
-}
+    const main = document.createElement('div');
+    main.className = 'exp-main';
+    const nm = document.createElement('div');
+    nm.className = 'exp-name';
+    nm.textContent = it.name;
+    const tag = document.createElement('div');
+    tag.className = 'exp-tag';
+    tag.textContent = it.kind === 'oneoff' ? 'one-off' : 'monthly';
+    main.appendChild(nm); main.appendChild(tag);
 
-function renderItem() {
-  const item = items[itemIndex];
-  textEn.textContent = item.english;
-  textDe.textContent = item.german;
-  textFr.textContent = item.french;
-  progressEl.textContent = `${itemIndex + 1} / ${items.length}`;
-  highlight(null);
-  updateMediaMetadata();
-}
+    const amt = document.createElement('div');
+    amt.className = 'exp-amt';
+    amt.textContent = money(Number(it.amount) || 0);
 
-function highlight(key) {
-  for (const k of Object.keys(langRows)) {
-    langRows[k].classList.toggle('speaking', k === key);
+    const tick = document.createElement('button');
+    tick.className = 'tick' + (paid ? ' on' : '');
+    tick.setAttribute('aria-label', paid ? 'Mark as not paid' : 'Mark as paid');
+    tick.textContent = '✓';
+    tick.addEventListener('click', (e) => { e.stopPropagation(); togglePaid(it.id); });
+
+    li.appendChild(ico); li.appendChild(main); li.appendChild(amt); li.appendChild(tick);
+    li.addEventListener('click', () => openEdit(it));
+    list.appendChild(li);
   }
 }
 
-/* ================================================================== *
- * TTS engine — Web Speech API
- * ================================================================== */
-const synth = window.speechSynthesis;
-let voices = [];
-
-function refreshVoices() { voices = synth ? synth.getVoices() : []; }
-if (synth) {
-  refreshVoices();
-  synth.addEventListener('voiceschanged', refreshVoices);
+function togglePaid(id) {
+  const m = ensureMonth(currentKey);
+  if (m.paid[id]) delete m.paid[id]; else m.paid[id] = true;
+  save();
+  renderMonthly();
 }
 
-/* Pick the best installed voice for a language prefix ('en', 'de', 'fr'). */
-function pickVoice(langPrefix) {
-  if (!voices.length) refreshVoices();
-  const matches = voices.filter(v => v.lang && v.lang.toLowerCase().startsWith(langPrefix));
-  if (!matches.length) return null;
-  // Prefer a locally installed / default voice for reliability offline.
-  return matches.find(v => v.default) || matches.find(v => v.localService) || matches[0];
+/* ------------------------------------------------------------------ *
+ * Budget (setup) screen
+ * ------------------------------------------------------------------ */
+function renderBudget() {
+  // preset chips
+  const chips = el('presetChips');
+  chips.innerHTML = '';
+  for (const p of PRESETS) {
+    const b = document.createElement('button');
+    b.className = 'chip';
+    b.type = 'button';
+    b.innerHTML = '<span class="chip-ico">' + p.icon + '</span>' + p.name;
+    b.addEventListener('click', () => openAdd({ name: p.name, icon: p.icon }));
+    chips.appendChild(b);
+  }
+
+  // recurring list
+  const list = el('recurringList');
+  list.innerHTML = '';
+  el('recurringEmpty').hidden = state.recurring.length > 0;
+  for (const it of state.recurring) {
+    const col = colorFor(it.name);
+    const li = document.createElement('li');
+    li.className = 'bud';
+    li.innerHTML =
+      '<div class="ico" style="background:' + col.bg + ';color:' + col.fg + '">' + (it.icon || guessIcon(it.name)) + '</div>' +
+      '<div class="bud-main"><div class="bud-name"></div><div class="bud-amt">' + money(Number(it.amount) || 0) + ' · monthly</div></div>' +
+      '<div class="chev">›</div>';
+    li.querySelector('.bud-name').textContent = it.name;
+    li.addEventListener('click', () => openEdit({ ...it, kind: 'recurring' }));
+    list.appendChild(li);
+  }
+
+  el('currencySel').value = state.currency;
 }
 
-/* Speak one phase; resolve when finished (or errored). */
-function speakPhase(phase) {
-  return new Promise((resolve) => {
-    if (!synth) { resolve(); return; }
-    const u = new SpeechSynthesisUtterance(phase.text);
-    u.lang = phase.lang;
-    const v = pickVoice(phase.lang.slice(0, 2));
-    if (v) u.voice = v;
-    u.rate = speechRate;
-    u.pitch = 1.0;
-    u.onstart = () => {
-      highlight(phase.key);
-      statusEl.textContent = `Speaking ${labelFor(phase.key)}${phase.again ? ' again' : ''}…`;
-    };
-    u.onend = () => resolve();
-    u.onerror = () => resolve(); // never wedge the queue on an engine error
-    synth.speak(u);
-  });
+/* ------------------------------------------------------------------ *
+ * Add / edit expense sheet
+ * ------------------------------------------------------------------ */
+let editing = null; // { mode:'add'|'edit', id, kind, icon }
+
+function openAdd(prefill) {
+  editing = { mode: 'add', id: null, kind: 'recurring', icon: (prefill && prefill.icon) || null };
+  el('sheetTitle').textContent = 'Add expense';
+  el('fName').value = (prefill && prefill.name) || '';
+  el('fAmount').value = '';
+  el('fCur').textContent = state.currency;
+  setRecurring(true);
+  el('sheetDelete').hidden = true;
+  openSheet('sheet');
+  if (!el('fName').value) el('fName').focus(); else el('fAmount').focus();
 }
 
-function labelFor(key) {
-  return { en: 'English', de: 'German', fr: 'French' }[key] || key;
+function openEdit(it) {
+  editing = { mode: 'edit', id: it.id, kind: it.kind, icon: it.icon || null };
+  el('sheetTitle').textContent = 'Edit expense';
+  el('fName').value = it.name;
+  el('fAmount').value = (it.amount != null) ? it.amount : '';
+  el('fCur').textContent = state.currency;
+  setRecurring(it.kind !== 'oneoff');
+  el('sheetDelete').hidden = false;
+  openSheet('sheet');
 }
 
-/* Drive the sequence forward from the current phase. */
-async function runFromCurrentPhase() {
-  if (!isPlaying) return;
-  const phases = phasesForCurrentItem();
-  // Guard against the phase count shrinking mid-sentence (e.g. the repeat
-  // option is toggled off while a repeated phase is queued).
-  if (phaseIndex >= phases.length) { advanceToNextItem(); return; }
-  const phase = phases[phaseIndex];
-
-  await speakPhase(phase);
-  if (!isPlaying) return; // paused/stopped mid-utterance
-
-  // Pause between languages, then continue.
-  phaseTimer = setTimeout(() => {
-    if (!isPlaying) return;
-    if (phaseIndex < phases.length - 1) {
-      phaseIndex += 1;
-      runFromCurrentPhase();
-    } else {
-      advanceToNextItem(); // finished fr -> next phrase
-    }
-  }, phase.pauseAfter);
+function setRecurring(isRec) {
+  editing.recurring = isRec;
+  for (const b of el('fRecurring').querySelectorAll('.seg')) {
+    b.classList.toggle('active', (b.dataset.val === 'true') === isRec);
+  }
+  el('oneoffHelp').hidden = isRec;
 }
 
-function advanceToNextItem() {
-  phaseIndex = 0;
-  if (itemIndex < items.length - 1) {
-    itemIndex += 1;
-    renderItem();
-    if (isPlaying) runFromCurrentPhase();
-  } else if (el('loopChk').checked) {
-    itemIndex = 0;             // loop the topic
-    renderItem();
-    if (isPlaying) runFromCurrentPhase();
+function removeItemEverywhere(id) {
+  state.recurring = state.recurring.filter((e) => e.id !== id);
+  for (const k in state.months) {
+    const m = state.months[k];
+    if (Array.isArray(m.oneoffs)) m.oneoffs = m.oneoffs.filter((e) => e.id !== id);
+  }
+}
+
+function saveSheet() {
+  const name = el('fName').value.trim();
+  const amount = parseFloat(el('fAmount').value);
+  if (!name) { toast('Give it a name'); return; }
+  if (!isFinite(amount) || amount < 0) { toast('Enter a valid amount'); return; }
+
+  const id = editing.id || uid();
+  const item = { id, name, amount: Math.round(amount * 100) / 100, icon: editing.icon || guessIcon(name) };
+
+  if (editing.mode === 'edit') removeItemEverywhere(id);
+  if (editing.recurring) {
+    state.recurring.push(item);
   } else {
-    stop();
-    statusEl.textContent = 'Finished topic';
+    ensureMonth(currentKey).oneoffs.push(item);
   }
+  save();
+  closeSheet('sheet');
+  // Re-render whichever screen is visible.
+  if (!el('monthly').hidden) renderMonthly(); else renderBudget();
+  toast(editing.mode === 'edit' ? 'Saved' : 'Added');
 }
 
-/* ================================================================== *
- * Transport controls
- * ================================================================== */
-function play() {
-  if (isPlaying) return;
-  startSession();          // begin/keep the media session (needs a user gesture)
-  isPlaying = true;
-  setPlayIcon(true);
-  setMediaPlaybackState('playing');
-  startKeepAlive();
-  runFromCurrentPhase();
+function deleteItem() {
+  if (!editing || !editing.id) return;
+  removeItemEverywhere(editing.id);
+  // Also drop any paid flags for it.
+  for (const k in state.months) { if (state.months[k].paid) delete state.months[k].paid[editing.id]; }
+  save();
+  closeSheet('sheet');
+  if (!el('monthly').hidden) renderMonthly(); else renderBudget();
+  toast('Deleted');
 }
 
-function pause() {
-  if (!isPlaying) return;
-  isPlaying = false;
-  clearTimeout(phaseTimer);
-  stopKeepAlive();
-  if (synth) synth.cancel();          // stop current utterance immediately
-  highlight(null);
-  setPlayIcon(false);
-  setMediaPlaybackState('paused');
-  statusEl.textContent = 'Paused';
+/* ------------------------------------------------------------------ *
+ * Balance sheet
+ * ------------------------------------------------------------------ */
+function openBalance() {
+  const m = ensureMonth(currentKey);
+  el('balCur').textContent = state.currency;
+  el('balInput').value = (m.balance === null || m.balance === undefined) ? '' : m.balance;
+  openSheet('balSheet');
+  el('balInput').focus();
 }
 
-function togglePlay() { isPlaying ? pause() : play(); }
-
-function stop() {
-  isPlaying = false;
-  clearTimeout(phaseTimer);
-  stopKeepAlive();
-  if (synth) synth.cancel();
-  phaseIndex = 0;
-  highlight(null);
-  setPlayIcon(false);
-  setMediaPlaybackState('paused');
+function saveBalance() {
+  const v = parseFloat(el('balInput').value);
+  const m = ensureMonth(currentKey);
+  m.balance = isFinite(v) ? Math.round(v * 100) / 100 : null;
+  save();
+  closeSheet('balSheet');
+  renderMonthly();
 }
 
-/* Skip to next phrase and (if we were playing) start reading it at once.
- * This is what a double-tap on Bluetooth earphones triggers. */
-function next() {
-  const wasPlaying = isPlaying;
-  clearTimeout(phaseTimer);
-  if (synth) synth.cancel();
-  phaseIndex = 0;
-  if (itemIndex < items.length - 1) itemIndex += 1;
-  else itemIndex = 0; // wrap around
-  renderItem();
-  if (wasPlaying) { isPlaying = true; runFromCurrentPhase(); }
-  else statusEl.textContent = 'Ready';
-}
+/* ------------------------------------------------------------------ *
+ * Sheet open/close
+ * ------------------------------------------------------------------ */
+function openSheet(id) { el(id).hidden = false; }
+function closeSheet(id) { el(id).hidden = true; }
 
-function previous() {
-  const wasPlaying = isPlaying;
-  clearTimeout(phaseTimer);
-  if (synth) synth.cancel();
-  phaseIndex = 0;
-  if (itemIndex > 0) itemIndex -= 1;
-  else itemIndex = items.length - 1; // wrap around
-  renderItem();
-  if (wasPlaying) { isPlaying = true; runFromCurrentPhase(); }
-  else statusEl.textContent = 'Ready';
-}
-
-function setPlayIcon(playing) {
-  playBtn.textContent = playing ? '⏸' : '▶';
-  playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
-}
-
-/* Chrome silently stops speaking after ~15s of utterance/queue time.
- * Nudging the engine keeps long queues alive. */
-function startKeepAlive() {
-  stopKeepAlive();
-  keepAlive = setInterval(() => {
-    if (synth && synth.speaking && !synth.paused) { synth.pause(); synth.resume(); }
-  }, 10000);
-}
-function stopKeepAlive() { clearInterval(keepAlive); keepAlive = null; }
-
-/* ================================================================== *
- * Media Session — the headset / hardware-key bridge
- * ================================================================== */
-function startSession() {
-  if (sessionStarted) return;
-  // A short silent WAV, looped, keeps a real audio stream alive so the OS
-  // gives us a Media Session and routes headset media keys to this page.
+/* ------------------------------------------------------------------ *
+ * Backup / restore
+ * ------------------------------------------------------------------ */
+function exportData() {
   try {
-    silenceAudio.src = makeSilentWavDataUri(1);
-    silenceAudio.volume = 0;
-    const p = silenceAudio.play();
-    if (p && p.catch) p.catch(() => {/* autoplay blocked until gesture; play() is called from a click */});
-  } catch (e) { console.warn('silent audio failed', e); }
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'spendable-backup-' + ym(new Date()) + '.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast('Backup downloaded');
+  } catch (e) { toast('Could not export'); }
+}
 
-  if ('mediaSession' in navigator) {
+function importData(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
     try {
-      navigator.mediaSession.setActionHandler('play',  () => play());
-      navigator.mediaSession.setActionHandler('pause', () => pause());
-      navigator.mediaSession.setActionHandler('nexttrack',     () => next());
-      navigator.mediaSession.setActionHandler('previoustrack', () => previous());
-      navigator.mediaSession.setActionHandler('stop', () => stop());
-    } catch (e) { console.warn('mediaSession handlers failed', e); }
-  }
-  sessionStarted = true;
-  updateMediaMetadata();
+      const s = JSON.parse(reader.result);
+      if (!s || typeof s !== 'object' || !('recurring' in s) || !('months' in s)) {
+        toast('That file is not a Spendable backup'); return;
+      }
+      state = {
+        v: 1,
+        currency: s.currency || '€',
+        recurring: Array.isArray(s.recurring) ? s.recurring : [],
+        months: (s.months && typeof s.months === 'object') ? s.months : {},
+      };
+      save();
+      showScreen('budget');
+      toast('Backup restored');
+    } catch (e) { toast('Could not read that file'); }
+  };
+  reader.readAsText(file);
 }
 
-function updateMediaMetadata() {
-  if (!('mediaSession' in navigator) || !window.MediaMetadata) return;
-  const topic = course?.lessons?.[lessonIndex]?.topic || 'Language Learner';
-  const item = items[itemIndex];
-  navigator.mediaSession.metadata = new MediaMetadata({
-    title: item ? item.english.slice(0, 60) : topic,
-    artist: topic,
-    album: course?.courseTitle || 'Cycling Language Loop',
-  });
-}
-
-function setMediaPlaybackState(state) {
-  if ('mediaSession' in navigator) {
-    try { navigator.mediaSession.playbackState = state; } catch (e) {/* ignore */}
-  }
-}
-
-/* Build a silent PCM WAV as a data: URI (mono, 8 kHz, 16-bit, all zero samples). */
-function makeSilentWavDataUri(seconds) {
-  const sampleRate = 8000;
-  const numSamples = sampleRate * seconds;
-  const dataSize = numSamples * 2;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
-  writeStr(0, 'RIFF');
-  view.setUint32(4, 36 + dataSize, true);
-  writeStr(8, 'WAVE');
-  writeStr(12, 'fmt ');
-  view.setUint32(16, 16, true);      // PCM chunk size
-  view.setUint16(20, 1, true);       // PCM format
-  view.setUint16(22, 1, true);       // mono
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true); // byte rate
-  view.setUint16(32, 2, true);       // block align
-  view.setUint16(34, 16, true);      // bits per sample
-  writeStr(36, 'data');
-  view.setUint32(40, dataSize, true);
-  // sample bytes are already zero (silence)
-  let binary = '';
-  const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return 'data:audio/wav;base64,' + btoa(binary);
-}
-
-/* ================================================================== *
- * Wiring
- * ================================================================== */
-playBtn.addEventListener('click', togglePlay);
-el('nextBtn').addEventListener('click', next);
-el('prevBtn').addEventListener('click', previous);
-el('backBtn').addEventListener('click', () => { stop(); showScreen('home'); });
-
-// Keyboard shortcuts (handy on desktop / some wired remotes).
-document.addEventListener('keydown', (e) => {
-  if (playerScreen.hidden) return;
-  if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
-  else if (e.code === 'ArrowRight') next();
-  else if (e.code === 'ArrowLeft') previous();
-});
-
-/* Remember the option controls between sessions (per-device convenience). */
-const OPTS = { repeat: 'll.repeatDeFr', loop: 'll.loopTopic', speed: 'll.speed' };
-function restoreToggle(chk, key) {
-  try { const v = localStorage.getItem(key); if (v !== null) chk.checked = v === '1'; } catch (e) {/* ignore */}
-  chk.addEventListener('change', () => {
-    try { localStorage.setItem(key, chk.checked ? '1' : '0'); } catch (e) {/* ignore */}
-  });
-}
-restoreToggle(el('repeatChk'), OPTS.repeat);
-restoreToggle(el('loopChk'), OPTS.loop);
-
-/* Speed slider → TTS rate. Applies to the next spoken phrase immediately. */
-const speedRange = el('speedRange');
-const speedVal = el('speedVal');
-function applySpeed(v) {
-  speechRate = Math.min(1.5, Math.max(0.5, Number(v) || 0.9));
-  speedRange.value = String(speechRate);
-  speedVal.textContent = speechRate.toFixed(2) + '×';
-}
-try { const s = localStorage.getItem(OPTS.speed); applySpeed(s !== null ? s : speedRange.value); }
-catch (e) { applySpeed(speedRange.value); }
-speedRange.addEventListener('input', () => {
-  applySpeed(speedRange.value);
-  try { localStorage.setItem(OPTS.speed, String(speechRate)); } catch (e) {/* ignore */}
-});
-
-/* ================================================================== *
- * Helpers
- * ================================================================== */
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
+/* ------------------------------------------------------------------ *
+ * Toast
+ * ------------------------------------------------------------------ */
 let toastTimer = null;
 function toast(msg) {
   const t = el('toast');
-  t.textContent = msg;
-  t.hidden = false;
+  t.textContent = msg; t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, 4000);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
 }
 
-/* ================================================================== *
+/* ------------------------------------------------------------------ *
+ * Wiring
+ * ------------------------------------------------------------------ */
+el('prevMonth').addEventListener('click', () => { currentKey = shiftMonth(currentKey, -1); renderMonthly(); });
+el('nextMonth').addEventListener('click', () => { currentKey = shiftMonth(currentKey, 1); renderMonthly(); });
+el('addFab').addEventListener('click', () => openAdd(null));
+el('balanceStat').addEventListener('click', openBalance);
+
+el('navMonthly').addEventListener('click', () => showScreen('monthly'));
+el('navBudget').addEventListener('click', () => showScreen('budget'));
+
+el('fRecurring').addEventListener('click', (e) => {
+  const b = e.target.closest('.seg'); if (!b) return;
+  setRecurring(b.dataset.val === 'true');
+});
+el('sheetSave').addEventListener('click', saveSheet);
+el('sheetCancel').addEventListener('click', () => closeSheet('sheet'));
+el('sheetDelete').addEventListener('click', deleteItem);
+el('sheet').addEventListener('click', (e) => { if (e.target === el('sheet')) closeSheet('sheet'); });
+
+el('balSave').addEventListener('click', saveBalance);
+el('balCancel').addEventListener('click', () => closeSheet('balSheet'));
+el('balSheet').addEventListener('click', (e) => { if (e.target === el('balSheet')) closeSheet('balSheet'); });
+
+el('customForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const name = el('customName').value.trim();
+  if (!name) return;
+  el('customName').value = '';
+  openAdd({ name });
+});
+
+el('currencySel').addEventListener('change', () => {
+  state.currency = el('currencySel').value || '€';
+  save();
+  renderBudget();
+});
+
+el('exportBtn').addEventListener('click', exportData);
+el('importBtn').addEventListener('click', () => el('importFile').click());
+el('importFile').addEventListener('change', (e) => { if (e.target.files[0]) importData(e.target.files[0]); e.target.value = ''; });
+
+/* ------------------------------------------------------------------ *
  * Boot
- * ================================================================== */
-if (!('speechSynthesis' in window)) {
-  toast('This browser has no speech synthesis. Try Chrome, Edge or Safari.');
-}
-loadCourse();
+ * ------------------------------------------------------------------ */
+ensureMonth(currentKey);
+showScreen('monthly');
 
-// Register the service worker for offline use (PWA). Ignored on file://.
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW failed', e));
-  });
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
 }
