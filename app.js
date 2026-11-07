@@ -289,6 +289,9 @@ function renderMonthly() {
     vp.hidden = true;
   }
 
+  // Reset-this-month button: shown only when the month actually has something to clear.
+  el('resetMonthBtn').hidden = !monthHasData(currentKey);
+
   // List
   const list = el('expenseList');
   const empty = el('emptyState');
@@ -524,7 +527,6 @@ function deleteItem() {
  * Per-month amount sheet (for a varying bill)
  * ------------------------------------------------------------------ */
 let amtQueue = [];                 // remaining items in a "set them all" chain
-const autoPrompted = new Set();    // month keys already auto-prompted this session
 
 function openMonthAmount(it) {
   editingAmtId = it.id;
@@ -550,19 +552,10 @@ function advanceChain() {
 }
 function stopChain() { amtQueue = []; }
 
-/* On entering a month, prompt once (per session) to set any variable amounts. */
-function maybeAutoPrompt(k) {
-  if (autoPrompted.has(k)) return;
-  const needs = needsSetItems(k).filter((it) => !ensureMonth(k).paid[it.id]);
-  if (!needs.length) return;
-  autoPrompted.add(k);
-  startVariableChain(needs);
-}
-
 function enterMonth(k) {
   currentKey = k;
   renderMonthly();
-  maybeAutoPrompt(k);
+  // No auto-popup: the "Set now" banner at the top of the list is the reminder.
 }
 
 function saveMonthAmount() {
@@ -605,6 +598,32 @@ function saveBalance() {
   save();
   closeSheet('balSheet');
   renderMonthly();
+}
+
+/* ------------------------------------------------------------------ *
+ * Reset a month (start it over)
+ * ------------------------------------------------------------------ */
+function monthHasData(k) {
+  const mm = state.months[k];
+  if (!mm) return false;
+  return (mm.balance !== null && mm.balance !== undefined) ||
+    (mm.paid && Object.keys(mm.paid).length > 0) ||
+    (mm.amounts && Object.keys(mm.amounts).length > 0) ||
+    (Array.isArray(mm.oneoffs) && mm.oneoffs.length > 0);
+}
+
+function openResetConfirm() {
+  el('resetTitle').textContent = 'Reset ' + MONTHS[keyParts(currentKey).m - 1] + '?';
+  openSheet('resetSheet');
+}
+
+function resetMonth() {
+  delete state.months[currentKey];
+  ensureMonth(currentKey);
+  save();
+  closeSheet('resetSheet');
+  renderMonthly();
+  toast(MONTHS[keyParts(currentKey).m - 1] + ' reset');
 }
 
 /* ------------------------------------------------------------------ *
@@ -699,6 +718,11 @@ el('balSave').addEventListener('click', saveBalance);
 el('balCancel').addEventListener('click', () => closeSheet('balSheet'));
 el('balSheet').addEventListener('click', (e) => { if (e.target === el('balSheet')) closeSheet('balSheet'); });
 
+el('resetMonthBtn').addEventListener('click', openResetConfirm);
+el('resetConfirm').addEventListener('click', resetMonth);
+el('resetCancel').addEventListener('click', () => closeSheet('resetSheet'));
+el('resetSheet').addEventListener('click', (e) => { if (e.target === el('resetSheet')) closeSheet('resetSheet'); });
+
 el('customForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const name = el('customName').value.trim();
@@ -722,7 +746,6 @@ el('importFile').addEventListener('change', (e) => { if (e.target.files[0]) impo
  * ------------------------------------------------------------------ */
 ensureMonth(currentKey);
 showScreen('monthly');
-maybeAutoPrompt(currentKey);
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));

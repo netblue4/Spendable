@@ -70,6 +70,7 @@
     </div>
     <ul id="expenseList" class="expense-list" aria-label="Expenses for this month"></ul>
     <div id="emptyState" class="empty" hidden></div>
+    <button id="resetMonthBtn" class="reset-month" type="button" hidden>↺ Reset this month</button>
     <div class="list-spacer"></div>
 
     <button id="addFab" class="fab" aria-label="Add an expense">+</button>
@@ -216,6 +217,20 @@
       <div class="grow"></div>
       <button id="amtCancel" class="btn ghost" type="button">Cancel</button>
       <button id="amtSave" class="btn" type="button">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== reset-month confirm sheet ===================== -->
+<div id="resetSheet" class="sheet-backdrop" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="resetTitle">
+    <div class="sheet-handle" aria-hidden="true"></div>
+    <h2 id="resetTitle" class="sheet-title">Reset this month?</h2>
+    <p class="help" id="resetHelp">This clears this month's balance, ticks and any amounts you set. Your bills (the budget) stay exactly as they are.</p>
+    <div class="sheet-actions">
+      <div class="grow"></div>
+      <button id="resetCancel" class="btn ghost" type="button">Cancel</button>
+      <button id="resetConfirm" class="btn danger-solid" type="button">Reset month</button>
     </div>
   </div>
 </div>
