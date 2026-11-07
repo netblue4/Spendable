@@ -4,7 +4,7 @@
  * cache, so updates show up on reload. We only fall back to the cache when the
  * network fails (offline), which keeps the app usable with no signal.
  * Bump CACHE whenever you want to guarantee old caches are evicted. */
-const CACHE = 'spendable-v2';
+const CACHE = 'spendable-v3';
 const ASSETS = [
   './',
   './index.html',

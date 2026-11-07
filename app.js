@@ -241,7 +241,10 @@ function renderMonthly() {
   }
   empty.hidden = true;
   const m = ensureMonth(currentKey);
-  for (const it of c.items) {
+  // Show unpaid expenses first; ticked (paid) ones sink to the bottom.
+  // Array.sort is stable, so the order within each group is preserved.
+  const ordered = c.items.slice().sort((a, b) => (m.paid[a.id] ? 1 : 0) - (m.paid[b.id] ? 1 : 0));
+  for (const it of ordered) {
     const paid = !!m.paid[it.id];
     const col = colorFor(it.name);
     const li = document.createElement('li');
