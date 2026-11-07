@@ -68,6 +68,25 @@ function money(n) {
   return sign + state.currency + v;
 }
 
+/* Parse an amount the user typed, accepting both "," and "." as the decimal
+ * separator (iPhone keyboards in many countries show a comma) and tolerating
+ * thousands separators and stray currency symbols. */
+function parseAmount(v) {
+  if (typeof v === 'number') return v;
+  if (v == null) return NaN;
+  let s = String(v).trim().replace(/\s/g, '').replace(/[^0-9.,-]/g, '');
+  if (!s) return NaN;
+  const hasComma = s.indexOf(',') > -1, hasDot = s.indexOf('.') > -1;
+  if (hasComma && hasDot) {
+    // The separator that appears last is the decimal one; the other is thousands.
+    if (s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\./g, '').replace(',', '.');
+    else s = s.replace(/,/g, '');
+  } else if (hasComma) {
+    s = s.replace(',', '.'); // lone comma = decimal separator
+  }
+  return parseFloat(s);
+}
+
 function ensureMonth(k) {
   if (!state.months[k]) state.months[k] = { balance: null, paid: {}, oneoffs: [] };
   const m = state.months[k];
@@ -370,7 +389,7 @@ function removeItemEverywhere(id) {
 
 function saveSheet() {
   const name = el('fName').value.trim();
-  const amount = parseFloat(el('fAmount').value);
+  const amount = parseAmount(el('fAmount').value);
   if (!name) { toast('Give it a name'); return; }
   if (!isFinite(amount) || amount < 0) { toast('Enter a valid amount'); return; }
 
@@ -413,7 +432,7 @@ function openBalance() {
 }
 
 function saveBalance() {
-  const v = parseFloat(el('balInput').value);
+  const v = parseAmount(el('balInput').value);
   const m = ensureMonth(currentKey);
   m.balance = isFinite(v) ? Math.round(v * 100) / 100 : null;
   save();
