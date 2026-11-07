@@ -50,6 +50,7 @@ function save() {
 const el = (id) => document.getElementById(id);
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const MONTHS_SHORT = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 let currentKey = ym(new Date());
 
@@ -88,19 +89,41 @@ function parseAmount(v) {
 }
 
 function ensureMonth(k) {
-  if (!state.months[k]) state.months[k] = { balance: null, paid: {}, oneoffs: [] };
+  if (!state.months[k]) state.months[k] = { balance: null, paid: {}, oneoffs: [], amounts: {} };
   const m = state.months[k];
   if (!m.paid) m.paid = {};
   if (!Array.isArray(m.oneoffs)) m.oneoffs = [];
+  if (!m.amounts) m.amounts = {};        // per-month amount overrides for variable bills
   if (m.balance === undefined) m.balance = null;
   return m;
 }
 
-/* All expense items shown for a month: recurring template + this month's one-offs. */
+/* The amount to use for an item in a given month: a per-month override when the
+ * bill varies and one has been set, otherwise its default (template) amount. */
+function amountFor(item, k) {
+  const m = ensureMonth(k);
+  if (item.variable && m.amounts && m.amounts[item.id] != null) return Number(m.amounts[item.id]) || 0;
+  return Number(item.amount) || 0;
+}
+function hasOverride(item, k) {
+  const m = state.months[k];
+  return !!(item.variable && m && m.amounts && m.amounts[item.id] != null);
+}
+
+/* All expense items shown for a month:
+ *  - monthly recurring bills: every month
+ *  - yearly bills: only in their due month
+ *  - one-offs: only the month they were added to                              */
 function itemsFor(k) {
   const m = ensureMonth(k);
-  const rec = state.recurring.map((e) => ({ ...e, kind: 'recurring' }));
-  const one = m.oneoffs.map((e) => ({ ...e, kind: 'oneoff' }));
+  const mon = keyParts(k).m;
+  const rec = state.recurring
+    .filter((e) => {
+      const f = e.freq || 'monthly';
+      return f === 'monthly' || (f === 'yearly' && Number(e.dueMonth) === mon);
+    })
+    .map((e) => ({ ...e, freq: e.freq || 'monthly', kind: 'recurring' }));
+  const one = m.oneoffs.map((e) => ({ ...e, freq: 'oneoff', kind: 'oneoff' }));
   return rec.concat(one);
 }
 
@@ -109,7 +132,7 @@ function computeMonth(k) {
   const items = itemsFor(k);
   let reserved = 0, paidSum = 0, paidN = 0;
   for (const it of items) {
-    const amt = Number(it.amount) || 0;
+    const amt = amountFor(it, k);
     if (m.paid[it.id]) { paidSum += amt; paidN += 1; }
     else reserved += amt;
   }
@@ -281,12 +304,13 @@ function renderMonthly() {
     nm.textContent = it.name;
     const tag = document.createElement('div');
     tag.className = 'exp-tag';
-    tag.textContent = it.kind === 'oneoff' ? 'one-off' : 'monthly';
+    tag.textContent = tagFor(it, currentKey);
+    if (it.variable && !hasOverride(it, currentKey)) tag.classList.add('needs-set');
     main.appendChild(nm); main.appendChild(tag);
 
     const amt = document.createElement('div');
     amt.className = 'exp-amt';
-    amt.textContent = money(Number(it.amount) || 0);
+    amt.textContent = money(amountFor(it, currentKey));
 
     const tick = document.createElement('button');
     tick.className = 'tick' + (paid ? ' on' : '');
@@ -295,9 +319,19 @@ function renderMonthly() {
     tick.addEventListener('click', (e) => { e.stopPropagation(); togglePaid(it.id); });
 
     li.appendChild(ico); li.appendChild(main); li.appendChild(amt); li.appendChild(tick);
-    li.addEventListener('click', () => openEdit(it));
+    // Varying bills: tapping sets just this month's amount. Others open the editor.
+    li.addEventListener('click', () => { if (it.variable) openMonthAmount(it); else openEdit(it); });
     list.appendChild(li);
   }
+}
+
+/* Small caption under each expense name. */
+function tagFor(it, k) {
+  const f = it.freq || (it.kind === 'oneoff' ? 'oneoff' : 'monthly');
+  let base = f === 'oneoff' ? 'one-off' : f === 'yearly' ? 'yearly' : 'monthly';
+  if (f === 'yearly' && it.dueMonth) base = 'yearly · ' + MONTHS_SHORT[it.dueMonth - 1];
+  if (it.variable) return hasOverride(it, k) ? (base + ' · varies') : 'tap to set this month';
+  return base;
 }
 
 function togglePaid(id) {
@@ -329,11 +363,14 @@ function renderBudget() {
   el('recurringEmpty').hidden = state.recurring.length > 0;
   for (const it of state.recurring) {
     const col = colorFor(it.name);
+    const f = it.freq || 'monthly';
+    let cadence = f === 'yearly' ? ('yearly · ' + (it.dueMonth ? MONTHS_SHORT[it.dueMonth - 1] : '?')) : 'monthly';
+    if (it.variable) cadence += ' · varies';
     const li = document.createElement('li');
     li.className = 'bud';
     li.innerHTML =
       '<div class="ico" style="background:' + col.bg + ';color:' + col.fg + '">' + (it.icon || guessIcon(it.name)) + '</div>' +
-      '<div class="bud-main"><div class="bud-name"></div><div class="bud-amt">' + money(Number(it.amount) || 0) + ' · monthly</div></div>' +
+      '<div class="bud-main"><div class="bud-name"></div><div class="bud-amt">' + money(Number(it.amount) || 0) + ' · ' + cadence + '</div></div>' +
       '<div class="chev">›</div>';
     li.querySelector('.bud-name').textContent = it.name;
     li.addEventListener('click', () => openEdit({ ...it, kind: 'recurring' }));
@@ -346,7 +383,8 @@ function renderBudget() {
 /* ------------------------------------------------------------------ *
  * Add / edit expense sheet
  * ------------------------------------------------------------------ */
-let editing = null; // { mode:'add'|'edit', id, kind, icon }
+let editing = null;      // { mode, id, kind, icon, freq, dueMonth, variable }
+let editingAmtId = null; // id for the per-month amount sheet
 
 function openAdd(prefill) {
   editing = { mode: 'add', id: null, kind: 'recurring', icon: (prefill && prefill.icon) || null };
@@ -354,29 +392,62 @@ function openAdd(prefill) {
   el('fName').value = (prefill && prefill.name) || '';
   el('fAmount').value = '';
   el('fCur').textContent = state.currency;
-  setRecurring(true);
+  editing.dueMonth = keyParts(currentKey).m;
+  setFreq('monthly');
+  setVariable(false);
   el('sheetDelete').hidden = true;
   openSheet('sheet');
   if (!el('fName').value) el('fName').focus(); else el('fAmount').focus();
 }
 
 function openEdit(it) {
+  const freq = it.kind === 'oneoff' ? 'oneoff' : (it.freq || 'monthly');
   editing = { mode: 'edit', id: it.id, kind: it.kind, icon: it.icon || null };
   el('sheetTitle').textContent = 'Edit expense';
   el('fName').value = it.name;
   el('fAmount').value = (it.amount != null) ? it.amount : '';
   el('fCur').textContent = state.currency;
-  setRecurring(it.kind !== 'oneoff');
+  editing.dueMonth = it.dueMonth || keyParts(currentKey).m;
+  setFreq(freq);
+  setVariable(!!it.variable);
   el('sheetDelete').hidden = false;
   openSheet('sheet');
 }
 
-function setRecurring(isRec) {
-  editing.recurring = isRec;
-  for (const b of el('fRecurring').querySelectorAll('.seg')) {
-    b.classList.toggle('active', (b.dataset.val === 'true') === isRec);
+function setFreq(freq) {
+  editing.freq = freq;
+  for (const b of el('fFreq').querySelectorAll('.seg')) {
+    b.classList.toggle('active', b.dataset.val === freq);
   }
-  el('oneoffHelp').hidden = isRec;
+  const help = el('freqHelp');
+  if (freq === 'yearly') { help.hidden = false; help.textContent = 'Shows up only in the month it’s due, every year.'; }
+  else if (freq === 'oneoff') { help.hidden = false; help.textContent = 'One-off expenses only show up in the month you’re viewing.'; }
+  else { help.hidden = true; help.textContent = ''; }
+  el('monthPicker').hidden = freq !== 'yearly';
+  if (freq === 'yearly') renderMonthPicker();
+  el('variableField').hidden = freq === 'oneoff';
+  if (freq === 'oneoff') setVariable(false);
+}
+
+function setVariable(on) {
+  editing.variable = !!on;
+  for (const b of el('fVariable').querySelectorAll('.seg')) {
+    b.classList.toggle('active', (b.dataset.val === 'true') === !!on);
+  }
+  el('variableHelp').hidden = !on;
+}
+
+function renderMonthPicker() {
+  const grid = el('mpGrid');
+  grid.innerHTML = '';
+  for (let i = 1; i <= 12; i++) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'mp-btn' + (editing.dueMonth === i ? ' active' : '');
+    b.textContent = MONTHS_SHORT[i - 1];
+    b.addEventListener('click', () => { editing.dueMonth = i; renderMonthPicker(); });
+    grid.appendChild(b);
+  }
 }
 
 function removeItemEverywhere(id) {
@@ -389,22 +460,27 @@ function removeItemEverywhere(id) {
 
 function saveSheet() {
   const name = el('fName').value.trim();
-  const amount = parseAmount(el('fAmount').value);
+  let amount = parseAmount(el('fAmount').value);
   if (!name) { toast('Give it a name'); return; }
-  if (!isFinite(amount) || amount < 0) { toast('Enter a valid amount'); return; }
+  const freq = editing.freq;
+  const variable = freq !== 'oneoff' && editing.variable;
+  // A variable bill may have a blank/0 default — you set the real figure each month.
+  if (!isFinite(amount) || amount < 0) {
+    if (variable) amount = 0; else { toast('Enter a valid amount'); return; }
+  }
 
   const id = editing.id || uid();
   const item = { id, name, amount: Math.round(amount * 100) / 100, icon: editing.icon || guessIcon(name) };
+  if (freq === 'yearly') { item.freq = 'yearly'; item.dueMonth = editing.dueMonth || keyParts(currentKey).m; }
+  else if (freq === 'monthly') { item.freq = 'monthly'; }
+  if (variable) item.variable = true;
 
   if (editing.mode === 'edit') removeItemEverywhere(id);
-  if (editing.recurring) {
-    state.recurring.push(item);
-  } else {
-    ensureMonth(currentKey).oneoffs.push(item);
-  }
+  if (freq === 'oneoff') ensureMonth(currentKey).oneoffs.push(item);
+  else state.recurring.push(item);
+
   save();
   closeSheet('sheet');
-  // Re-render whichever screen is visible.
   if (!el('monthly').hidden) renderMonthly(); else renderBudget();
   toast(editing.mode === 'edit' ? 'Saved' : 'Added');
 }
@@ -412,12 +488,51 @@ function saveSheet() {
 function deleteItem() {
   if (!editing || !editing.id) return;
   removeItemEverywhere(editing.id);
-  // Also drop any paid flags for it.
-  for (const k in state.months) { if (state.months[k].paid) delete state.months[k].paid[editing.id]; }
+  for (const k in state.months) {
+    if (state.months[k].paid) delete state.months[k].paid[editing.id];
+    if (state.months[k].amounts) delete state.months[k].amounts[editing.id];
+  }
   save();
   closeSheet('sheet');
   if (!el('monthly').hidden) renderMonthly(); else renderBudget();
   toast('Deleted');
+}
+
+/* ------------------------------------------------------------------ *
+ * Per-month amount sheet (for a varying bill)
+ * ------------------------------------------------------------------ */
+function openMonthAmount(it) {
+  editingAmtId = it.id;
+  const mName = MONTHS[keyParts(currentKey).m - 1];
+  el('amtTitle').textContent = it.name + ' — ' + mName;
+  el('amtCur').textContent = state.currency;
+  const m = ensureMonth(currentKey);
+  const cur = (m.amounts && m.amounts[it.id] != null) ? m.amounts[it.id] : (Number(it.amount) || 0);
+  el('amtInput').value = cur;
+  el('amtHelp').textContent = 'Set the amount for ' + mName + ' only. Default is ' + money(Number(it.amount) || 0) + '.';
+  openSheet('amtSheet');
+  el('amtInput').focus();
+}
+
+function saveMonthAmount() {
+  if (!editingAmtId) return;
+  const m = ensureMonth(currentKey);
+  const v = parseAmount(el('amtInput').value);
+  if (isFinite(v) && v >= 0) m.amounts[editingAmtId] = Math.round(v * 100) / 100;
+  else delete m.amounts[editingAmtId];
+  save();
+  closeSheet('amtSheet');
+  renderMonthly();
+}
+
+function resetMonthAmount() {
+  if (!editingAmtId) return;
+  const m = ensureMonth(currentKey);
+  delete m.amounts[editingAmtId];
+  save();
+  closeSheet('amtSheet');
+  renderMonthly();
+  toast('Using the default amount');
 }
 
 /* ------------------------------------------------------------------ *
@@ -506,14 +621,23 @@ el('balanceStat').addEventListener('click', openBalance);
 el('navMonthly').addEventListener('click', () => showScreen('monthly'));
 el('navBudget').addEventListener('click', () => showScreen('budget'));
 
-el('fRecurring').addEventListener('click', (e) => {
+el('fFreq').addEventListener('click', (e) => {
   const b = e.target.closest('.seg'); if (!b) return;
-  setRecurring(b.dataset.val === 'true');
+  setFreq(b.dataset.val);
+});
+el('fVariable').addEventListener('click', (e) => {
+  const b = e.target.closest('.seg'); if (!b) return;
+  setVariable(b.dataset.val === 'true');
 });
 el('sheetSave').addEventListener('click', saveSheet);
 el('sheetCancel').addEventListener('click', () => closeSheet('sheet'));
 el('sheetDelete').addEventListener('click', deleteItem);
 el('sheet').addEventListener('click', (e) => { if (e.target === el('sheet')) closeSheet('sheet'); });
+
+el('amtSave').addEventListener('click', saveMonthAmount);
+el('amtReset').addEventListener('click', resetMonthAmount);
+el('amtCancel').addEventListener('click', () => closeSheet('amtSheet'));
+el('amtSheet').addEventListener('click', (e) => { if (e.target === el('amtSheet')) closeSheet('amtSheet'); });
 
 el('balSave').addEventListener('click', saveBalance);
 el('balCancel').addEventListener('click', () => closeSheet('balSheet'));

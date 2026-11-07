@@ -198,6 +198,7 @@ input, button, select { font-family: inherit; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .exp .exp-tag { font-size: .72rem; color: var(--muted); }
+.exp .exp-tag.needs-set { color: var(--accent); font-weight: 700; }
 .exp .exp-amt { font-weight: 800; font-size: 1.02rem; margin-right: 2px; white-space: nowrap; }
 .exp.paid { opacity: .62; }
 .exp.paid .exp-name { text-decoration: line-through; text-decoration-color: var(--faint); }
@@ -415,6 +416,24 @@ input, button, select { font-family: inherit; }
   cursor: pointer;
 }
 .seg.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
+.seg { padding: 12px 6px; text-align: center; }
+
+/* yearly month picker */
+.month-picker { margin-top: 12px; }
+.mp-label { display: block; font-size: .82rem; color: var(--muted); margin-bottom: 8px; font-weight: 600; }
+.mp-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.mp-btn {
+  border: 1.5px solid var(--line);
+  background: #fff;
+  border-radius: 12px;
+  padding: 12px 0;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: .9rem;
+}
+.mp-btn.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
+.mp-btn:active { transform: scale(.95); }
 
 .sheet-actions { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
 .grow { flex: 1; }

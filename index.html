@@ -143,11 +143,24 @@
     </label>
     <div class="field">
       <span>How often?</span>
-      <div class="segmented" id="fRecurring">
-        <button type="button" data-val="true" class="seg active">Every month</button>
-        <button type="button" data-val="false" class="seg">One-off</button>
+      <div class="segmented" id="fFreq">
+        <button type="button" data-val="monthly" class="seg active">Every month</button>
+        <button type="button" data-val="yearly" class="seg">Yearly</button>
+        <button type="button" data-val="oneoff" class="seg">One-off</button>
       </div>
-      <p class="help" id="oneoffHelp" hidden>One-off expenses only show up in the month you're viewing.</p>
+      <p class="help" id="freqHelp" hidden></p>
+      <div id="monthPicker" class="month-picker" hidden>
+        <span class="mp-label">Which month is it due?</span>
+        <div class="mp-grid" id="mpGrid"></div>
+      </div>
+    </div>
+    <div class="field" id="variableField">
+      <span>Could the amount change each month?</span>
+      <div class="segmented" id="fVariable">
+        <button type="button" data-val="false" class="seg active">No, it's fixed</button>
+        <button type="button" data-val="true" class="seg">Yes, it varies</button>
+      </div>
+      <p class="help" id="variableHelp" hidden>You'll set the exact amount each month by tapping it on the Monthly screen.</p>
     </div>
     <div class="sheet-actions">
       <button id="sheetDelete" class="btn ghost danger" type="button" hidden>Delete</button>
@@ -175,6 +188,28 @@
       <div class="grow"></div>
       <button id="balCancel" class="btn ghost" type="button">Cancel</button>
       <button id="balSave" class="btn" type="button">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== amount-for-this-month sheet ===================== -->
+<div id="amtSheet" class="sheet-backdrop" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="amtTitle">
+    <div class="sheet-handle" aria-hidden="true"></div>
+    <h2 id="amtTitle" class="sheet-title">Amount</h2>
+    <p class="help" id="amtHelp">Set the amount for this month only.</p>
+    <label class="field">
+      <span>Amount</span>
+      <div class="amount-input big">
+        <span class="cur" id="amtCur">€</span>
+        <input id="amtInput" class="text-input" type="text" inputmode="decimal" placeholder="0.00" />
+      </div>
+    </label>
+    <div class="sheet-actions">
+      <button id="amtReset" class="btn ghost" type="button">Use default</button>
+      <div class="grow"></div>
+      <button id="amtCancel" class="btn ghost" type="button">Cancel</button>
+      <button id="amtSave" class="btn" type="button">Save</button>
     </div>
   </div>
 </div>
